@@ -228,6 +228,10 @@ Slides from this talk
 
 .link https://github.com/jackc/acr15-pg-json
 
+Benchmark application
+
+.link https://github.com/jackc/json_api_bench
+
 Bonus! PostgreSQL ActiveRecord extension (fast trees with CTEs)
 
 .link https://github.com/jackc/edge
