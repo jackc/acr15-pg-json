@@ -1,0 +1,233 @@
+Faster JSON Generation in PostgreSQL (and Rails)
+
+Jack Christensen
+@j3c10
+http://www.jackchristensen.com
+
+* Some factors that can slow Rails JSON APIs
+
+- ActiveRecord loads all columns by default
+- PostgreSQL to ActiveRecord to hash to JSON is inefficient
+
+* The dictionary domain
+
+Look up a word and include all the associated records.
+
+  word = Word
+    .includes(:definitions, :quotes, :synonyms, :antonyms)
+    .where(text: params[:word])
+    .first
+
+Build hash (as_json, jbuilder, serializer)
+
+    for_json = {
+      text: word.text,
+      pronunciation: word.pronunciation,
+      definitions: word.definitions.map { |d| d.attributes.slice "part_of_speech", "body" },
+      quotes: word.quotes.map { |q| q.attributes.slice "body", "source" },
+      synonyms: word.synonyms.map(&:text),
+      antonyms: word.antonyms.map(&:text)
+    }
+
+    render json: for_json
+
+* Benchmarks
+
+- Rails production environment
+- Unicorn with 4 workers
+- siege
+- Tables include "noise" columns
+- Late 2012 MacBook Air
+
+* Rails 3.2 Performance
+
+- 120 req/sec
+- Maybe we can do better?
+
+* Rails 4.2 Performance
+
+- 85 req/sec
+- Loses almost 1/3 performance!
+- Other benchmarks average 10-15% loss
+
+* PostgreSQL Performance
+
+- 430 req/sec on Rails 3.2
+- 415 req/sec on Rails 4.2
+- 5x faster than normal Rails
+
+* PostgreSQL JSON Generation
+
+- row_to_json
+
+  select row_to_json(words) from words;
+
+- Returns each row as a JSON document
+
+  {"id":6013,"text":"advancement","pronunciation":"advancement",...}
+
+* PostgreSQL JSON Generation
+
+- But we don't want all the columns
+
+  select row_to_json(row(id, text)) from words;
+
+- Yuck... it killed the column names
+
+  {"f1":6013,"f2":"advancement"}
+
+* PostgreSQL JSON Generation
+
+- Solution is subqueries
+
+  select row_to_json(t)
+  from (
+    select id, text from words
+  ) t
+
+- This gives us the proper response
+
+  {"id":6013,"text":"advancement"}
+
+* PostgreSQL JSON Generation
+
+- array_agg and array_to_json (PostgreSQL 9.2)
+
+    select array_to_json(array_agg(row_to_json(t)))
+    from (
+      select id, text from words
+    ) t
+
+- JSON array results
+
+    [{"id":1001,"text":"abaissed"}, {"id":1002,"text":"abbatial"},...]
+
+- json_agg (PostgreSQL 9.3)
+
+    select json_agg(row_to_json(t))
+    from (
+      select id, text from words
+    ) t
+
+* Nested Objects
+
+- Big increase in SQL complexity
+
+    select row_to_json(t)
+    from (
+      select text, pronunciation,
+        (
+          select array_to_json(array_agg(row_to_json(d)))
+          from (
+            select part_of_speech, body
+            from definitions
+            where word_id=words.id
+            order by position asc
+          ) d
+        ) as definitions
+      from words
+      where text = 'autumn'
+
+* Nested Objects
+
+    {
+      "text": "autumn",
+      "pronunciation": "autumn",
+      "definitions": [
+        {
+            "part_of_speech": "noun",
+            "body": "skilder wearifully uninfolded..."
+        },
+        {
+            "part_of_speech": "verb",
+            "body": "intrafissural fernbird kittly..."
+        },
+        {
+            "part_of_speech": "adverb",
+            "body": "infrugal lansquenet impolarizable..."
+        }
+      ]
+    }
+
+* SQL for Benchmark
+
+- Use ActiveRecord::Connection.select_value
+- 37 lines of SQL
+
+    select row_to_json(t)
+    from (
+      select text, pronunciation,
+        (
+          select array_to_json(array_agg(row_to_json(d)))
+          from (
+            select part_of_speech, body
+            from definitions
+            where word_id=words.id
+            order by position asc
+          ) d
+        ) as definitions,
+        (
+          select array_to_json(array_agg(row_to_json(q)))
+          from (
+            select body, source
+            from quotes
+            where word_id=words.id
+          ) q
+        ) as quotes,
+        (
+          select array_to_json(array_agg(text))
+          from words related_words
+            join word_relationships on related_words.id=word_relationships.destination_id
+          where source_id=words.id
+            and relationship='synonym'
+        ) as synonyms,
+        (
+          select array_to_json(array_agg(text))
+          from words related_words
+            join word_relationships on related_words.id=word_relationships.destination_id
+          where source_id=words.id
+            and relationship='antonym'
+        ) as antonyms
+      from words
+      where text = #{DB.quote(params[:word])}
+    ) t
+
+* Tradeoffs
+
+- Really fast
+- Lots of SQL (but that's not too bad...)
+
+* Surus can help (sometimes)
+
+- Surus gem provides PostgreSQL extensions for ActiveRecord
+- Builds row_to_json for ActiveRecord objects
+- Supports simple associations like basic has_many
+
+    User.find_json 1
+    User.find_json 1, columns: [:id, :name, :email]
+    Post.find_json 1, include: :author
+    User.find_json(user.id, include: {posts: {columns: [:id, :subject]}})
+    User.all_json
+    User.where(admin: true).all_json
+    User.all_json(columns: [:id, :name, :email], include: {posts: {columns: [:id, :subject]}})
+    Post.all_json(include: [:forum, :post])
+
+- Fails with more complicated assocations
+
+* Links
+
+Blog post with more details
+
+.link http://hashrocket.com/blog/posts/faster-json-generation-with-postgresql
+
+Surus gem so you don't have to write the SQL
+
+.link https://github.com/jackc/surus
+
+Slides from this talk
+
+.link https://github.com/jackc/acr15-pg-json
+
+Bonus! PostgreSQL ActiveRecord extension (fast trees with CTEs)
+
+.link https://github.com/jackc/edge
